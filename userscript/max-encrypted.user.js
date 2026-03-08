@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Max Encrypted
 // @namespace    http://tampermonkey.net/
-// @version      1.1.0
-// @description  Шифровка чата
+// @version      1.3.0
+// @description  Шифровка чата Max
 // @author       ArturKaktus
 // @match        https://web.max.ru/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=max.ru
@@ -18,460 +18,458 @@
 (function() {
     'use strict';
 
+    // ========== КОНФИГУРАЦИЯ ==========
+    const CONFIG = {
+        SELECTORS: {
+            INPUT: 'div.contenteditable.svelte-1k31az8[contenteditable=""]',
+            SEND_BUTTON: 'button[aria-label="Отправить сообщение"]',
+            MESSAGE_META: '.meta.svelte-13lobfv',
+            MESSAGE_TEXT: 'span.text.svelte-1htnb3l',
+            BUTTON_CONTAINER: '.btn.svelte-nwz8cp'
+        },
+        STORAGE_KEY: 'encryptionKey',
+        NOTIFICATION_TIMEOUT: 2000
+    };
+
+    // ========== ЛОГГЕР ==========
     const Logger = {
         log: (...args) => console.log('%c🔐', 'color: #4CAF50; font-weight: bold;', ...args),
         success: (...args) => console.log('%c✅', 'color: green; font-weight: bold;', ...args)
     };
 
     // ========== КРИПТОГРАФИЯ ==========
-    async function encryptMessage(text, key) {
-        const encoder = new TextEncoder();
-        const data = encoder.encode(text);
+    const Crypto = {
+        async encrypt(text, key) {
+            const encoder = new TextEncoder();
+            const data = encoder.encode(text);
+            const keyData = this._prepareKey(key);
 
-        const keyData = new Uint8Array(32);
-        const keyEncoder = new TextEncoder();
-        const keyBytes = keyEncoder.encode(key);
-        for (let i = 0; i < 32; i++) {
-            keyData[i] = i < keyBytes.length ? keyBytes[i] : 0;
-        }
+            const cryptoKey = await crypto.subtle.importKey(
+                'raw', keyData, { name: 'AES-GCM', length: 256 }, false, ['encrypt']
+            );
 
-        const cryptoKey = await crypto.subtle.importKey(
-            'raw', keyData, { name: 'AES-GCM', length: 256 }, false, ['encrypt']
-        );
+            const iv = crypto.getRandomValues(new Uint8Array(12));
+            const encrypted = await crypto.subtle.encrypt(
+                { name: 'AES-GCM', iv, tagLength: 128 }, cryptoKey, data
+            );
 
-        const iv = crypto.getRandomValues(new Uint8Array(12));
-        const encrypted = await crypto.subtle.encrypt(
-            { name: 'AES-GCM', iv: iv, tagLength: 128 }, cryptoKey, data
-        );
+            const result = new Uint8Array(iv.length + encrypted.byteLength);
+            result.set(iv, 0);
+            result.set(new Uint8Array(encrypted), iv.length);
 
-        const result = new Uint8Array(iv.length + encrypted.byteLength);
-        result.set(iv, 0);
-        result.set(new Uint8Array(encrypted), iv.length);
+            return btoa(String.fromCharCode(...result));
+        },
 
-        let binary = '';
-        for (let i = 0; i < result.length; i++) {
-            binary += String.fromCharCode(result[i]);
-        }
+        async decrypt(encryptedData, key) {
+            try {
+                const data = Uint8Array.from(atob(encryptedData), c => c.charCodeAt(0));
+                const iv = data.slice(0, 12);
+                const encrypted = data.slice(12);
 
-        return btoa(binary);
-    }
+                const keyData = this._prepareKey(key);
+                const cryptoKey = await crypto.subtle.importKey(
+                    'raw', keyData, { name: 'AES-GCM', length: 256 }, false, ['decrypt']
+                );
 
-    async function decryptMessage(encryptedData, key) {
-        try {
-            const data = Uint8Array.from(atob(encryptedData), c => c.charCodeAt(0));
-            const iv = data.slice(0, 12);
-            const encrypted = data.slice(12);
+                const decrypted = await crypto.subtle.decrypt(
+                    { name: 'AES-GCM', iv, tagLength: 128 },
+                    cryptoKey,
+                    encrypted
+                );
 
+                return new TextDecoder().decode(decrypted);
+            } catch {
+                return null;
+            }
+        },
+
+        _prepareKey(key) {
             const keyData = new Uint8Array(32);
-            const keyEncoder = new TextEncoder();
-            const keyBytes = keyEncoder.encode(key);
+            const keyBytes = new TextEncoder().encode(key);
             for (let i = 0; i < 32; i++) {
                 keyData[i] = i < keyBytes.length ? keyBytes[i] : 0;
             }
-
-            const cryptoKey = await crypto.subtle.importKey(
-                'raw', keyData, { name: 'AES-GCM', length: 256 }, false, ['decrypt']
-            );
-
-            const decrypted = await crypto.subtle.decrypt(
-                { name: 'AES-GCM', iv: iv, tagLength: 128 },
-                cryptoKey,
-                encrypted
-            );
-
-            const decoder = new TextDecoder();
-            return decoder.decode(decrypted);
-        } catch (error) {
-            return null;
+            return keyData;
         }
-    }
+    };
 
     // ========== РАБОТА С DOM ==========
-    function findInputField() {
-        return document.querySelector('div.contenteditable.svelte-1k31az8[contenteditable=""]');
-    }
+    const DOM = {
+    input: () => document.querySelector('div.contenteditable.svelte-1k31az8[contenteditable=""]'),
+    sendButton: () => document.querySelector('button[aria-label="Отправить сообщение"]'),
 
-    function findSendButton() {
-        return document.querySelector('button[aria-label="Отправить сообщение"]');
-    }
-
-    function getInputText() {
-        const input = findInputField();
+    getInputText() {
+        const input = this.input();
         if (!input) return '';
-        const span = input.querySelector('span[data-lexical-text="true"]');
-        return span ? span.textContent || '' : input.textContent || '';
-    }
 
-    function replaceText(newText) {
-        const input = findInputField();
+        // Сначала ищем span с текстом (самый надежный способ)
+        const span = input.querySelector('span[data-lexical-text="true"]');
+        if (span && span.textContent) {
+            return span.textContent;
+        }
+
+        // Если span не нашли, ищем параграф
+        const p = input.querySelector('p.paragraph');
+        if (p && p.textContent) {
+            return p.textContent;
+        }
+
+        // Если ничего не нашли, берем весь текст
+        return input.textContent || '';
+    },
+
+    replaceText(newText) {
+        const input = this.input();
         if (!input) return false;
 
         input.focus();
         document.execCommand('selectAll', false, null);
-
-        setTimeout(() => {
-            document.execCommand('insertText', false, newText);
-        }, 50);
-
+        setTimeout(() => document.execCommand('insertText', false, newText), 50);
         return true;
-    }
+    },
 
-    // ========== РАБОТА С КЛЮЧОМ ==========
-    let currentKey = GM_getValue('encryptionKey', null);
-
-    function setCurrentKey(key) {
-        currentKey = key;
-        GM_setValue('encryptionKey', key);
+    findContainer() {
+        const btn = this.sendButton();
+        return btn?.closest('.btn.svelte-nwz8cp');
     }
+};
+    // ========== УПРАВЛЕНИЕ КЛЮЧОМ ==========
+    const KeyManager = {
+        _key: GM_getValue(CONFIG.STORAGE_KEY, null),
+
+        get() { return this._key; },
+
+        set(key) {
+            this._key = key;
+            GM_setValue(CONFIG.STORAGE_KEY, key);
+            UI.updateAll();
+        },
+
+        clear() {
+            this._key = null;
+            GM_setValue(CONFIG.STORAGE_KEY, null);
+            UI.updateAll();
+        }
+    };
 
     // ========== ИНТЕРФЕЙС ==========
-    GM_addStyle(`
-        .encrypt-btn {
-            margin-right: 8px;
-            width: 40px;
-            height: 40px;
-            border-radius: 8px;
-            background: #f44336;
-            color: white;
-            border: none;
-            cursor: pointer;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 20px;
-            transition: background 0.2s;
-            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
-        }
-        .encrypt-btn.key-set {
-            background: #4CAF50;
-        }
-        .decrypt-btn-added {
-            margin-left: 8px;
-            padding: 2px 6px;
-            border-radius: 4px;
-            background: #4CAF50;
-            color: white;
-            border: none;
-            cursor: pointer;
-            font-size: 11px;
-            transition: background 0.2s;
-        }
-        .decrypt-btn-added:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-        }
-        #max-encrypted-panel {
-            position: fixed;
-            top: 10px;
-            right: 10px;
-            z-index: 10000;
-            background: #1a1a1a;
-            color: white;
-            padding: 12px;
-            border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.5);
-            font-family: sans-serif;
-            min-width: 250px;
-        }
-        #encrypt-status {
-            position: fixed;
-            bottom: 10px;
-            left: 10px;
-            padding: 5px 10px;
-            border-radius: 4px;
-            font-size: 12px;
-            z-index: 10000;
-            color: white;
-            transition: background 0.3s;
-        }
-    `);
+    const UI = {
+        init() {
+            GM_addStyle(`
+                .encrypt-btn {
+                    margin-right: 8px;
+                    width: 40px;
+                    height: 40px;
+                    border-radius: 8px;
+                    background: #f44336;
+                    color: white;
+                    border: none;
+                    cursor: pointer;
+                    display: inline-flex;
+                    align-items: center;
+                    justify-content: center;
+                    font-size: 20px;
+                    transition: background 0.2s;
+                    box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+                }
+                .encrypt-btn.key-set { background: #4CAF50; }
+                .decrypt-btn-added {
+                    margin-left: 8px;
+                    padding: 2px 6px;
+                    border-radius: 4px;
+                    background: #4CAF50;
+                    color: white;
+                    border: none;
+                    cursor: pointer;
+                    font-size: 11px;
+                    transition: background 0.2s;
+                }
+                .decrypt-btn-added:disabled { opacity: 0.5; cursor: not-allowed; }
+                #max-encrypted-panel {
+                    position: fixed;
+                    top: 10px;
+                    right: 10px;
+                    z-index: 10000;
+                    background: #1a1a1a;
+                    color: white;
+                    padding: 12px;
+                    border-radius: 8px;
+                    box-shadow: 0 2px 10px rgba(0,0,0,0.5);
+                    font-family: sans-serif;
+                    min-width: 250px;
+                }
+                #encrypt-status {
+                    position: fixed;
+                    bottom: 10px;
+                    left: 10px;
+                    padding: 5px 10px;
+                    border-radius: 4px;
+                    font-size: 12px;
+                    z-index: 10000;
+                    color: white;
+                    transition: background 0.3s;
+                }
+            `);
+        },
 
-    function updateEncryptButtonColor() {
-        const btn = document.querySelector('.encrypt-btn');
-        if (!btn) return;
+        updateAll() {
+            this.updateEncryptButton();
+            this.updateDecryptButtons();
+            this.updateStatusBadge();
+        },
 
-        if (currentKey) {
-            btn.classList.add('key-set');
-            btn.style.background = '#4CAF50';
-            btn.title = '🔐 Зашифровать текст';
+        updateEncryptButton() {
+            const btn = document.querySelector('.encrypt-btn');
+            if (!btn) return;
+
+            const hasKey = !!KeyManager.get();
+            btn.classList.toggle('key-set', hasKey);
+            btn.style.background = hasKey ? '#4CAF50' : '#f44336';
+            btn.title = hasKey ? '🔐 Зашифровать' : '❌ Нет ключа';
             btn.disabled = false;
-        } else {
-            btn.classList.remove('key-set');
-            btn.style.background = '#f44336';
-            btn.title = '❌ Нет ключа';
-            btn.disabled = false;
-        }
-    }
+        },
 
-    function updateStatus() {
-        const status = document.getElementById('encrypt-status');
-        if (status) {
-            status.style.background = currentKey ? '#4CAF50' : '#f44336';
-            status.innerHTML = currentKey ? '🔐 Ключ есть' : '🔓 Ключа нет';
-        }
+        updateDecryptButtons() {
+            document.querySelectorAll('.decrypt-btn-added').forEach(btn => {
+                btn.disabled = !KeyManager.get();
+            });
+        },
 
-        document.querySelectorAll('.decrypt-btn-added').forEach(btn => {
-            btn.disabled = !currentKey;
-        });
-    }
+        updateStatusBadge() {
+            const status = document.getElementById('encrypt-status');
+            if (!status) return;
 
-    function createControlPanel() {
-        if (document.getElementById('max-encrypted-panel')) return;
+            const hasKey = !!KeyManager.get();
+            status.style.background = hasKey ? '#4CAF50' : '#f44336';
+            status.innerHTML = hasKey ? '🔐 Ключ есть' : '🔓 Ключа нет';
+        },
 
-        const panel = document.createElement('div');
-        panel.id = 'max-encrypted-panel';
+        createPanel() {
+            if (document.getElementById('max-encrypted-panel')) return;
 
-        panel.innerHTML = `
-            <div style="display: flex; justify-content: space-between; margin-bottom: 10px;">
-                <span style="font-weight: bold;">🔐 Max Encrypted</span>
-                <button id="close-panel" style="background: none; border: none; color: white; cursor: pointer;">✕</button>
-            </div>
-            <input id="encrypt-key" placeholder="Ключ">
-            <div style="background:#2d2d2d; padding:6px; border-radius:4px; margin-bottom:8px; border-left:3px solid ${currentKey ? '#4CAF50' : '#f44336'};" id="key-display">
-                ${currentKey ? `🔑 Текущий ключ: ${currentKey}` : '❌ Ключ не установлен'}
-            </div>
-            <div style="display: flex; gap: 8px;">
-                <button id="save-key" style="flex:1; background:#4CAF50; color:white; border:none; padding:6px; border-radius:4px;">Сохранить</button>
-                <button id="clear-key" style="flex:1; background:#f44336; color:white; border:none; padding:6px; border-radius:4px;">Очистить</button>
-            </div>
-        `;
+            const panel = document.createElement('div');
+            panel.id = 'max-encrypted-panel';
+            const hasKey = KeyManager.get();
 
-        document.body.appendChild(panel);
+            panel.innerHTML = `
+                <div style="display: flex; justify-content: space-between; margin-bottom: 10px;">
+                    <span style="font-weight: bold;">🔐 Max Encrypted</span>
+                    <button id="close-panel" style="background: none; border: none; color: white; cursor: pointer;">✕</button>
+                </div>
+                <input id="encrypt-key" placeholder="Ключ" value="${hasKey || ''}" style="width:100%; padding:6px; margin-bottom:8px; background:#2d2d2d; color:white; border:1px solid #333; border-radius:4px;">
+                <div style="background:#2d2d2d; padding:6px; border-radius:4px; margin-bottom:8px; border-left:3px solid ${hasKey ? '#4CAF50' : '#f44336'};">
+                    ${hasKey ? `🔑 Текущий ключ: ${hasKey}` : '❌ Ключ не установлен'}
+                </div>
+                <div style="display: flex; gap: 8px;">
+                    <button id="save-key" style="flex:1; background:#4CAF50; color:white; border:none; padding:6px; border-radius:4px;">Сохранить</button>
+                    <button id="clear-key" style="flex:1; background:#f44336; color:white; border:none; padding:6px; border-radius:4px;">Очистить</button>
+                </div>
+            `;
 
-        document.getElementById('close-panel').onclick = () => panel.remove();
+            document.body.appendChild(panel);
 
-        document.getElementById('save-key').onclick = () => {
-            const newKey = document.getElementById('encrypt-key').value.trim();
-            if (newKey) {
-                setCurrentKey(newKey);
-                document.getElementById('key-display').innerHTML = `🔑 Текущий ключ: ${newKey}`;
-                document.getElementById('key-display').style.borderLeftColor = '#4CAF50';
-                updateEncryptButtonColor();
-                updateStatus();
-                GM_notification({ text: 'Ключ сохранен', timeout: 2000 });
-            }
-        };
+            document.getElementById('close-panel').onclick = () => panel.remove();
+            document.getElementById('save-key').onclick = () => {
+                const newKey = document.getElementById('encrypt-key').value.trim();
+                if (newKey) {
+                    KeyManager.set(newKey);
+                    panel.remove();
+                    GM_notification({ text: 'Ключ сохранен', timeout: CONFIG.NOTIFICATION_TIMEOUT });
+                }
+            };
+            document.getElementById('clear-key').onclick = () => {
+                KeyManager.clear();
+                document.getElementById('encrypt-key').value = '';
+                panel.remove();
+                GM_notification({ text: 'Ключ удален', timeout: CONFIG.NOTIFICATION_TIMEOUT });
+            };
+        },
 
-        document.getElementById('clear-key').onclick = () => {
-            setCurrentKey(null);
-            document.getElementById('encrypt-key').value = '';
-            document.getElementById('key-display').innerHTML = '❌ Ключ не установлен';
-            document.getElementById('key-display').style.borderLeftColor = '#f44336';
-            updateEncryptButtonColor();
-            updateStatus();
-            GM_notification({ text: 'Ключ удален', timeout: 2000 });
-        };
-    }
-
-    async function addEncryptButton() {
-        const sendButton = findSendButton();
-        if (!sendButton) return;
-
-        const container = sendButton.closest('.btn.svelte-nwz8cp');
-        if (!container) return;
-
-        // Удаляем старую кнопку если есть
-        const oldBtn = container.querySelector('.encrypt-btn');
-        if (oldBtn) oldBtn.remove();
-
-        const encryptBtn = document.createElement('button');
-        encryptBtn.className = 'encrypt-btn';
-        encryptBtn.innerHTML = '🔐';
-
-        updateEncryptButtonColor();
-
-        encryptBtn.onclick = async () => {
-            if (!currentKey) {
-                alert('Сначала установите ключ (⚙️)');
-                return;
-            }
-
-            const text = getInputText().trim();
-            if (!text) {
-                alert('Введите текст');
-                return;
-            }
-
-            if (text.startsWith('🔒[')) {
-                alert('Уже зашифровано');
-                return;
-            }
-
-            try {
-                encryptBtn.innerHTML = '⏳';
-                encryptBtn.disabled = true;
-
-                const encrypted = await encryptMessage(text, currentKey);
-                Logger.success('Текст зашифрован');
-
-                replaceText(`🔒[${encrypted}]`);
-
-                encryptBtn.innerHTML = '✅';
-                setTimeout(() => {
-                    encryptBtn.innerHTML = '🔐';
-                    encryptBtn.disabled = false;
-                    updateEncryptButtonColor();
-                }, 1000);
-
-            } catch (error) {
-                console.error(error);
-                encryptBtn.innerHTML = '❌';
-                setTimeout(() => {
-                    encryptBtn.innerHTML = '🔐';
-                    encryptBtn.disabled = false;
-                    updateEncryptButtonColor();
-                }, 1000);
-            }
-        };
-
-        container.insertBefore(encryptBtn, sendButton);
-        Logger.success('✅ Кнопка добавлена');
-    }
-
-    function addDecryptButtons() {
-        document.querySelectorAll('.message').forEach(msg => {
-            if (msg.querySelector('.decrypt-btn-added')) return;
-
-            const metaDiv = msg.querySelector('.meta.svelte-13lobfv');
-            const textSpan = msg.querySelector('span.text.svelte-1htnb3l');
-            if (!metaDiv || !textSpan) return;
-
-            const text = textSpan.textContent || '';
-            if (!text.includes('🔒[')) return;
+        async addEncryptButton() {
+            const container = DOM.findContainer();
+            if (!container || container.querySelector('.encrypt-btn')) return;
 
             const btn = document.createElement('button');
-            btn.className = 'decrypt-btn-added';
-            btn.innerHTML = '🔓';
-            btn.disabled = !currentKey;
+            btn.className = 'encrypt-btn';
+            btn.innerHTML = '🔐';
 
-            btn.onclick = async (e) => {
-                e.stopPropagation();
-
-                if (!currentKey) {
-                    alert('Сначала установите ключ');
+            btn.onclick = async () => {
+                const key = KeyManager.get();
+                if (!key) {
+                    alert('Сначала установите ключ (⚙️)');
                     return;
                 }
 
-                btn.innerHTML = '⏳';
-                btn.disabled = true;
+                const text = DOM.getInputText().trim();
+                if (!text) {
+                    alert('Введите текст');
+                    return;
+                }
 
-                const match = text.match(/🔒\[(.*?)\]/);
-                if (match) {
-                    const decrypted = await decryptMessage(match[1], currentKey);
+                if (text.startsWith('🔒[')) {
+                    alert('Уже зашифровано');
+                    return;
+                }
 
-                    btn.disabled = false;
+                try {
+                    btn.innerHTML = '⏳';
+                    btn.disabled = true;
 
-                    if (decrypted) {
-                        textSpan.textContent = `🔓 ${decrypted}`;
-                        btn.remove();
-                    } else {
-                        btn.innerHTML = '❌';
-                        setTimeout(() => {
-                            btn.innerHTML = '🔓';
-                        }, 2000);
-                    }
+                    const encrypted = await Crypto.encrypt(text, key);
+                    DOM.replaceText(`🔒[${encrypted}]`);
+
+                    btn.innerHTML = '✅';
+                    setTimeout(() => {
+                        btn.innerHTML = '🔐';
+                        this.updateEncryptButton();
+                    }, 1000);
+
+                } catch (error) {
+                    console.error(error);
+                    btn.innerHTML = '❌';
+                    setTimeout(() => {
+                        btn.innerHTML = '🔐';
+                        this.updateEncryptButton();
+                    }, 1000);
                 }
             };
 
-            metaDiv.appendChild(btn);
-        });
-    }
+            container.insertBefore(btn, DOM.sendButton());
+            this.updateEncryptButton();
+        },
 
-    function addPanelToggle() {
-        if (document.getElementById('max-encrypted-toggle')) return;
+        addDecryptButtons() {
+            document.querySelectorAll('.message').forEach(msg => {
+                if (msg.querySelector('.decrypt-btn-added')) return;
 
-        const toggle = document.createElement('button');
-        toggle.id = 'max-encrypted-toggle';
-        toggle.innerHTML = '⚙️';
-        toggle.style.cssText = `
-            position: fixed;
-            top: 10px;
-            right: 10px;
-            z-index: 10000;
-            width: 40px;
-            height: 40px;
-            border-radius: 50%;
-            background: #4CAF50;
-            color: white;
-            border: none;
-            cursor: pointer;
-            font-size: 20px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.3);
-        `;
-        toggle.onclick = createControlPanel;
-        document.body.appendChild(toggle);
-    }
+                const meta = msg.querySelector(CONFIG.SELECTORS.MESSAGE_META);
+                const textSpan = msg.querySelector(CONFIG.SELECTORS.MESSAGE_TEXT);
+                if (!meta || !textSpan) return;
 
-    // ========== ОТСЛЕЖИВАНИЕ СМЕНЫ ЧАТА ==========
-    let lastUrl = location.href;
-    let chatObserver = null;
+                const text = textSpan.textContent || '';
+                if (!text.includes('🔒[')) return;
 
-    function setupChatObserver() {
-        // Наблюдаем за изменением URL (смена чата)
-        const urlObserver = new MutationObserver(() => {
-            if (location.href !== lastUrl) {
-                lastUrl = location.href;
-                Logger.log('🔄 Чат изменен, восстанавливаем кнопку...');
+                const btn = document.createElement('button');
+                btn.className = 'decrypt-btn-added';
+                btn.innerHTML = '🔓';
+                btn.disabled = !KeyManager.get();
 
-                // Даем время на загрузку нового чата
-                setTimeout(() => {
-                    addEncryptButton();
-                    addDecryptButtons();
-                }, 1000);
-            }
-        });
+                btn.onclick = async (e) => {
+                    e.stopPropagation();
 
-        urlObserver.observe(document.querySelector('title'), {
-            childList: true,
-            subtree: true
-        });
+                    const key = KeyManager.get();
+                    if (!key) {
+                        alert('Сначала установите ключ');
+                        return;
+                    }
 
-        // Наблюдаем за появлением новых сообщений и кнопки отправки
-        if (chatObserver) chatObserver.disconnect();
+                    btn.innerHTML = '⏳';
+                    btn.disabled = true;
 
-        chatObserver = new MutationObserver(() => {
-            // Проверяем, есть ли кнопка шифрования
-            if (!document.querySelector('.encrypt-btn')) {
-                const sendButton = findSendButton();
-                if (sendButton) {
-                    Logger.log('🔄 Кнопка отправки появилась, восстанавливаем...');
-                    addEncryptButton();
-                }
-            }
-            addDecryptButtons();
-        });
+                    const match = text.match(/🔒\[(.*?)\]/);
+                    if (match) {
+                        const decrypted = await Crypto.decrypt(match[1], key);
+                        if (decrypted) {
+                            textSpan.textContent = `🔓 ${decrypted}`;
+                            btn.remove();
+                        } else {
+                            btn.innerHTML = '❌';
+                            setTimeout(() => btn.innerHTML = '🔓', 2000);
+                        }
+                    }
+                    btn.disabled = false;
+                };
 
-        chatObserver.observe(document.body, {
-            childList: true,
-            subtree: true,
-            attributes: true,
-            attributeFilter: ['class']
-        });
-    }
+                meta.appendChild(btn);
+            });
+        },
 
-    // ========== ЗАПУСК ==========
-    setTimeout(() => {
-        Logger.log('='.repeat(40));
-        Logger.log('🔐 Max Encrypted - ФИНАЛ С ОТСЛЕЖИВАНИЕМ');
-        Logger.log('='.repeat(40));
+        addToggleButton() {
+            if (document.getElementById('max-encrypted-toggle')) return;
 
-        const input = findInputField();
-        const sendButton = findSendButton();
-
-        setTimeout(updateEncryptButtonColor, 500);
-
-        if (input && sendButton) {
-            addPanelToggle();
-            addEncryptButton();
-            addDecryptButtons();
-            setupChatObserver();
-
-            const statusDiv = document.createElement('div');
-            statusDiv.id = 'encrypt-status';
-            updateStatus();
-            document.body.appendChild(statusDiv);
+            const btn = document.createElement('button');
+            btn.id = 'max-encrypted-toggle';
+            btn.innerHTML = '⚙️';
+            btn.style.cssText = `
+                position: fixed;
+                top: 10px;
+                right: 10px;
+                z-index: 10000;
+                width: 40px;
+                height: 40px;
+                border-radius: 50%;
+                background: #4CAF50;
+                color: white;
+                border: none;
+                cursor: pointer;
+                font-size: 20px;
+                box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+            `;
+            btn.onclick = () => this.createPanel();
+            document.body.appendChild(btn);
         }
+    };
 
+    // ========== НАБЛЮДЕНИЕ ЗА СМЕНОЙ ЧАТА ==========
+    const Observer = {
+        _lastUrl: location.href,
+        _chatObserver: null,
+
+        init() {
+            // Наблюдение за URL
+            new MutationObserver(() => {
+                if (location.href !== this._lastUrl) {
+                    this._lastUrl = location.href;
+                    Logger.log('🔄 Чат изменен');
+                    setTimeout(() => {
+                        UI.addEncryptButton();
+                        UI.addDecryptButtons();
+                        setTimeout(UI.updateEncryptButton, 100);
+                    }, 1000);
+                }
+            }).observe(document.querySelector('title'), { childList: true, subtree: true });
+
+            // Наблюдение за DOM
+            this._chatObserver = new MutationObserver(() => {
+                if (!document.querySelector('.encrypt-btn') && DOM.sendButton()) {
+                    Logger.log('🔄 Восстанавливаем кнопку');
+                    UI.addEncryptButton();
+                    setTimeout(UI.updateEncryptButton, 100);
+                }
+                UI.addDecryptButtons();
+            });
+
+            this._chatObserver.observe(document.body, {
+                childList: true,
+                subtree: true,
+                attributes: true,
+                attributeFilter: ['class']
+            });
+        }
+    };
+
+    // ========== ИНИЦИАЛИЗАЦИЯ ==========
+    function init() {
         Logger.log('='.repeat(40));
-    }, 2000);
+        Logger.log('🔐 Max Encrypted v2.0');
+        Logger.log('='.repeat(40));
+
+        UI.init();
+
+        setTimeout(() => {
+            if (DOM.input() && DOM.sendButton()) {
+                UI.addToggleButton();
+                UI.addEncryptButton();
+                UI.addDecryptButtons();
+                Observer.init();
+
+                const status = document.createElement('div');
+                status.id = 'encrypt-status';
+                UI.updateStatusBadge();
+                document.body.appendChild(status);
+            }
+        }, 2000);
+    }
+
+    init();
 })();
