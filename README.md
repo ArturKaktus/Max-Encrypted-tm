@@ -14,7 +14,8 @@
 1. Установите расширение [Tampermonkey](https://www.tampermonkey.net/) для запуска пользовательских скриптов
 2. Установите скрипт, перейдя по [этой ссылке](https://github.com/ArturKaktus/Max-Encrypted-tm/raw/refs/heads/main/userscript/max-encrypted.user.js). _(либо скачайте `max-encrypted.user.js` из папки `userscript` и установите вручную)_
 
-# ВАЖНОЕ ПРАВОВОЕ ПРЕДУПРЕЖДЕНИЕ (DISCLAIMER)
+---
+# ВАЖНОЕ ПРАВОВОЕ ПРЕДУПРЕЖДЕНИЕ
 
 **Прочтите это внимательно, прежде чем использовать данное программное обеспечение.**
 
