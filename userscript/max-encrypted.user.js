@@ -11,8 +11,8 @@
 // @grant        GM_addStyle
 // @grant        GM_notification
 // @run-at       document-end
-// @updateURL    https://github.com/ArturKaktus/Okko-logo-remover-tm/raw/refs/heads/main/userscript/max-encrypted.user.js
-// @downloadURL  https://github.com/ArturKaktus/Okko-logo-remover-tm/raw/refs/heads/main/userscript/max-encrypted.user.js
+// @updateURL    https://github.com/ArturKaktus/Max-Encrypted-tm/raw/refs/heads/main/userscript/max-encrypted.user.js
+// @downloadURL  https://github.com/ArturKaktus/Max-Encrypted-tm/raw/refs/heads/main/userscript/max-encrypted.user.js
 // ==/UserScript==
 
 (function() {
